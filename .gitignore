@@ -1,0 +1,16 @@
+# environment variables
+.env
+
+# python
+__pycache__/
+*.pyc
+venv/
+
+# node
+node_modules/
+
+# vscode
+.vscode/
+
+# system files
+.DS_Store
