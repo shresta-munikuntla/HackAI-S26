@@ -1,12 +1,15 @@
+import os
+from google import genai
+from dotenv import load_dotenv
 import streamlit as st
-import anthropic
-import time
+
+load_dotenv() #load variables from .env file
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="AI Text Analyzer",
     page_icon="🔍",
-    layout="wide",
+    layout="centered",
 )
 
 # ── Custom CSS ────────────────────────────────────────────────────────────────
@@ -248,15 +251,15 @@ div[data-testid="stButton"].primary-btn > button:hover {
 
 
 # ── Helper ───────────────────────────────────────────────────────────────────
-def call_claude(system_prompt: str, user_content: str) -> str:
-    client = anthropic.Anthropic()
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": user_content}],
-        system=system_prompt,
+def call_gemini(system_prompt: str, user_content: str) -> str:
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+    response = client.models.generate_content(
+        model="gemini-3-flash-preview",
+        contents=f"{system_prompt}\n\n{user_content}"
     )
-    return message.content[0].text
+
+    return response.text
 
 
 ANALYSES = {
@@ -353,7 +356,7 @@ if uploaded:
         system_p, user_tmpl = ANALYSES[selected]
         user_p = user_tmpl.format(text=text[:6000])  # trim to avoid token overrun
         with st.spinner(f"Analyzing · {selected.strip()} …"):
-            result = call_claude(system_p, user_p)
+            result = call_gemini(system_p, user_p)
 
         st.markdown(f"""
         <div class="result-card">
