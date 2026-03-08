@@ -2,8 +2,10 @@ import os
 from google import genai
 from dotenv import load_dotenv
 import streamlit as st
+from elevenlabs.client import ElevenLabs
 
 load_dotenv() #load variables from .env file
+print("Gemini key:", os.getenv("ELEVENLABS_API_KEY"))
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -255,13 +257,28 @@ def call_gemini(system_prompt: str, user_content: str) -> str:
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     response = client.models.generate_content(
-        model="gemini-3-flash-preview",
+        model="gemini-2.5-flash",
         contents=f"{system_prompt}\n\n{user_content}"
     )
 
     return response.text
+# ----------------------------------------------------------------------------------------------------------------------------------------
+def speak_text(text: str):
+    client = ElevenLabs(
+        api_key=os.getenv("ELEVENLABS_API_KEY")
+    )
 
+    audio = client.text_to_speech.convert(
+        text=text,
+        voice_id="JBFqnCBsd6RMkjVDRZzb",
+        model_id="eleven_multilingual_v2",
+        output_format="mp3_44100_128",
+    )
 
+    audio_bytes = b"".join(audio)
+
+    return audio_bytes
+# ----------------------------------------------------------------------------------------------------------------------------------------
 ANALYSES = {
     "📋  Summarize": (
         "You are an expert summarizer. Produce a concise, well-structured summary of the provided text. "
@@ -357,6 +374,12 @@ if uploaded:
         user_p = user_tmpl.format(text=text[:6000])  # trim to avoid token overrun
         with st.spinner(f"Analyzing · {selected.strip()} …"):
             result = call_gemini(system_p, user_p)
+            # Convert result text to speech
+            audio_bytes = speak_text(result)
+
+            # Play the audio
+            st.audio(audio_bytes, format="audio/mp3")
+            
 
         st.markdown(f"""
         <div class="result-card">
