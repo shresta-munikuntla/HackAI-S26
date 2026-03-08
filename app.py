@@ -1,9 +1,8 @@
-import os
-from google import genai
-from dotenv import load_dotenv
+import requests
 import streamlit as st
 
-load_dotenv() #load variables from .env file
+# ── Config ────────────────────────────────────────────────────────────────────
+API_BASE = "http://localhost:8000"   # FastAPI backend URL
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -16,7 +15,6 @@ st.set_page_config(
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:ital,wght@0,300;0,400;1,300&display=swap');
-
 :root {
     --bg:        #0d0f14;
     --surface:   #151820;
@@ -26,24 +24,20 @@ st.markdown("""
     --text:      #e8eaf0;
     --muted:     #6b7280;
 }
-
 html, body, [data-testid="stAppViewContainer"] {
     background: var(--bg) !important;
     color: var(--text) !important;
     font-family: 'Syne', sans-serif;
 }
-
 /* Hide Streamlit chrome */
 #MainMenu, footer, header { visibility: hidden; }
 [data-testid="stToolbar"] { display: none; }
-
 /* Main container */
 [data-testid="stAppViewContainer"] > .main > .block-container {
     padding: 3rem 4rem 4rem !important;
     max-width: 960px;
     margin: 0 auto;
 }
-
 /* ── Header ── */
 .header-wrap {
     display: flex;
@@ -79,7 +73,6 @@ html, body, [data-testid="stAppViewContainer"] {
     margin-bottom: 2.5rem;
     font-family: 'DM Mono', monospace;
 }
-
 /* ── Divider ── */
 .divider {
     height: 1px;
@@ -87,7 +80,6 @@ html, body, [data-testid="stAppViewContainer"] {
     margin: 2rem 0;
     border: none;
 }
-
 /* ── Upload zone ── */
 [data-testid="stFileUploader"] {
     background: var(--surface) !important;
@@ -117,7 +109,6 @@ html, body, [data-testid="stAppViewContainer"] {
     border-color: var(--accent) !important;
     color: var(--accent) !important;
 }
-
 /* ── Text preview box ── */
 .preview-box {
     background: var(--surface);
@@ -136,7 +127,6 @@ html, body, [data-testid="stAppViewContainer"] {
 .preview-box::-webkit-scrollbar { width: 4px; }
 .preview-box::-webkit-scrollbar-track { background: transparent; }
 .preview-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-
 /* ── Stat pills ── */
 .stat-row {
     display: flex;
@@ -156,7 +146,6 @@ html, body, [data-testid="stAppViewContainer"] {
     color: var(--accent);
     font-weight: 500;
 }
-
 /* ── Analysis buttons ── */
 .analysis-grid {
     display: grid;
@@ -164,7 +153,6 @@ html, body, [data-testid="stAppViewContainer"] {
     gap: 0.75rem;
     margin-bottom: 1.5rem;
 }
-
 /* Streamlit buttons */
 .stButton > button {
     width: 100% !important;
@@ -188,19 +176,6 @@ html, body, [data-testid="stAppViewContainer"] {
 .stButton > button:active {
     background: rgba(232,255,71,0.08) !important;
 }
-
-/* Primary / run button */
-div[data-testid="stButton"].primary-btn > button,
-.primary > button {
-    background: var(--accent) !important;
-    color: #0d0f14 !important;
-    border-color: var(--accent) !important;
-    font-weight: 800 !important;
-}
-div[data-testid="stButton"].primary-btn > button:hover {
-    background: #d4eb3a !important;
-}
-
 /* ── Result card ── */
 .result-card {
     background: var(--surface);
@@ -229,14 +204,12 @@ div[data-testid="stButton"].primary-btn > button:hover {
     color: var(--text);
     font-weight: 400;
 }
-
 /* ── Spinner override ── */
 [data-testid="stSpinner"] > div {
     color: var(--accent) !important;
     font-family: 'DM Mono', monospace !important;
     font-size: 0.8rem !important;
 }
-
 /* ── Error / info ── */
 [data-testid="stAlert"] {
     background: var(--surface) !important;
@@ -249,52 +222,41 @@ div[data-testid="stButton"].primary-btn > button:hover {
 </style>
 """, unsafe_allow_html=True)
 
-
-# ── Helper ───────────────────────────────────────────────────────────────────
-def call_gemini(system_prompt: str, user_content: str) -> str:
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-    response = client.models.generate_content(
-        model="gemini-3-flash-preview",
-        contents=f"{system_prompt}\n\n{user_content}"
-    )
-
-    return response.text
-
-
+# ── Analysis button labels → API keys ────────────────────────────────────────
 ANALYSES = {
-    "📋  Summarize": (
-        "You are an expert summarizer. Produce a concise, well-structured summary of the provided text. "
-        "Highlight the main ideas and key points in 3–5 sentences.",
-        "Please summarize this text:\n\n{text}",
-    ),
-    "😊  Sentiment": (
-        "You are a sentiment analysis expert. Analyze the emotional tone of the text. "
-        "State the overall sentiment (Positive / Neutral / Negative), provide a confidence level, "
-        "and briefly explain the key signals you found.",
-        "Analyze the sentiment of this text:\n\n{text}",
-    ),
-    "🔑  Key Themes": (
-        "You are a thematic analysis expert. Identify and explain the 3–5 main themes or topics "
-        "present in the text. Format each theme as a short title followed by a one-sentence explanation.",
-        "Identify the key themes in this text:\n\n{text}",
-    ),
-    "❓  Q&A Pairs": (
-        "You are an educational content creator. Generate 5 insightful question-and-answer pairs "
-        "based on the text. Each pair should test comprehension of an important concept.",
-        "Generate Q&A pairs from this text:\n\n{text}",
-    ),
-    "✍️  Writing Style": (
-        "You are a writing style critic. Analyze the writing style: tone, vocabulary level, sentence "
-        "structure, clarity, and intended audience. Be specific and constructive.",
-        "Analyze the writing style of this text:\n\n{text}",
-    ),
-    "🌍  Translate → ES": (
-        "You are a professional translator. Translate the text into Spanish, preserving the original "
-        "tone and meaning as closely as possible.",
-        "Translate this text to Spanish:\n\n{text}",
-    ),
+    "📋  Summarize":      "summarize",
+    "😊  Sentiment":      "sentiment",
+    "🔑  Key Themes":     "key_themes",
+    "❓  Q&A Pairs":      "qa_pairs",
+    "✍️  Writing Style":  "writing_style",
+    "🌍  Translate → ES": "translate_es",
 }
+
+
+def call_api(analysis_type: str, text: str) -> str:
+    """POST to the FastAPI backend and return the result string."""
+    try:
+        resp = requests.post(
+            f"{API_BASE}/analyze",
+            json={"analysis_type": analysis_type, "text": text},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()["result"]
+    except requests.exceptions.ConnectionError:
+        return (
+            "⚠️ Cannot reach the API server. "
+            "Make sure FastAPI is running: `uvicorn api:app --reload`"
+        )
+    except requests.exceptions.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.response.json().get("detail", "")
+        except Exception:
+            pass
+        return f"⚠️ API error {e.response.status_code}: {detail}"
+    except Exception as e:
+        return f"⚠️ Unexpected error: {e}"
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -305,7 +267,6 @@ st.markdown("""
 </div>
 <div class="header-sub">// upload a .txt file → choose an analysis → get instant insights</div>
 """, unsafe_allow_html=True)
-
 st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
 # ── File upload ──────────────────────────────────────────────────────────────
@@ -322,9 +283,9 @@ if uploaded:
     except UnicodeDecodeError:
         text = raw.decode("latin-1")
 
-    words  = len(text.split())
-    chars  = len(text)
-    lines  = len(text.splitlines())
+    words     = len(text.split())
+    chars     = len(text)
+    lines     = len(text.splitlines())
     sentences = text.count('.') + text.count('!') + text.count('?')
 
     # Stats
@@ -341,30 +302,27 @@ if uploaded:
     # Preview
     preview = text[:800] + ("…" if len(text) > 800 else "")
     st.markdown(f'<div class="preview-box">{preview}</div>', unsafe_allow_html=True)
-
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     st.markdown("**Choose an analysis**", help="Select one of the six analysis modes below.")
 
     # Analysis buttons in a 3-column grid
     cols = st.columns(3)
-    selected = None
+    selected_label = None
     for i, label in enumerate(ANALYSES):
         if cols[i % 3].button(label, key=f"btn_{i}"):
-            selected = label
+            selected_label = label
 
-    if selected:
-        system_p, user_tmpl = ANALYSES[selected]
-        user_p = user_tmpl.format(text=text[:6000])  # trim to avoid token overrun
-        with st.spinner(f"Analyzing · {selected.strip()} …"):
-            result = call_gemini(system_p, user_p)
+    if selected_label:
+        api_key = ANALYSES[selected_label]
+        with st.spinner(f"Analyzing · {selected_label.strip()} …"):
+            result = call_api(api_key, text)
 
         st.markdown(f"""
         <div class="result-card">
-          <div class="result-label">↳ {selected.strip()}</div>
+          <div class="result-label">↳ {selected_label.strip()}</div>
           <div class="result-content">{result.replace(chr(10), '<br>')}</div>
         </div>
         """, unsafe_allow_html=True)
-
 else:
     st.markdown("""
     <div style="text-align:center; padding: 3rem 0; color: #3a3f52; font-family:'DM Mono',monospace; font-size:0.8rem; letter-spacing:0.1em;">
