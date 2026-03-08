@@ -2,11 +2,10 @@ import streamlit as st
 import json
 import re
 import os
+import base64
 from datetime import datetime
 from google import genai
-
 from elevenlabs.client import ElevenLabs
-
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -117,16 +116,6 @@ html, body, [data-testid="stAppViewContainer"] {
 }
 .stButton > button:hover { background: #d4eb3a !important; }
 
-/* ── Step progress ── */
-.step-bar { display: flex; gap: 6px; margin: 1.5rem 0 0.5rem; flex-wrap: wrap; }
-.step-dot {
-    font-family: 'DM Mono', monospace; font-size: 0.65rem; letter-spacing: 0.08em;
-    padding: 3px 10px; border-radius: 20px; border: 1px solid var(--border);
-    color: var(--muted); text-transform: uppercase;
-}
-.step-dot.done   { border-color: var(--accent);  color: var(--accent); }
-.step-dot.active { border-color: var(--accent2); color: var(--accent2); background: rgba(71,197,255,0.07); }
-
 /* ── Signal hero ── */
 .signal-hero {
     border-radius: 10px; padding: 2rem 2.5rem; margin: 1.5rem 0;
@@ -180,6 +169,13 @@ html, body, [data-testid="stAppViewContainer"] {
 }
 .explanation-body { font-size: 0.9rem; line-height: 1.85; color: var(--text); }
 
+/* ── Audio player ── */
+.audio-label {
+    font-size: 0.6rem; font-family: 'DM Mono', monospace; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--accent); margin: 1.5rem 0 0.5rem;
+}
+[data-testid="stAudio"] { margin-top: 0.25rem; }
+
 @keyframes fadeIn {
     from { opacity: 0; transform: translateY(6px); }
     to   { opacity: 1; transform: translateY(0); }
@@ -197,7 +193,7 @@ html, body, [data-testid="stAppViewContainer"] {
 """, unsafe_allow_html=True)
 
 
-# ── Pipeline helpers ──────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def safe_parse_json(raw: str) -> dict:
     cleaned = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
@@ -213,196 +209,113 @@ def safe_parse_json(raw: str) -> dict:
     return {"parse_error": True, "raw": raw}
 
 
-GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_MODEL = "gemini-2.5-flash"
 
 def call_gemini(prompt: str) -> str:
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
-        st.error("GEMINI_API_KEY not set. Run: export GEMINI_API_KEY='your_key_here'")
+        st.error("GEMINI_API_KEY not set. Add it to your .env file.")
         st.stop()
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-    )
+    response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
     return (response.text or "").strip()
 
-# ── Text to Speech ───────────────────────────────────────────────────────────
-def speak_text(text: str):
-    client = ElevenLabs(
-        api_key=os.getenv("ELEVENLABS_API_KEY")
-    )
 
+def speak_text(text: str) -> bytes:
+    api_key = os.environ.get("ELEVENLABS_API_KEY", "")
+    if not api_key:
+        st.warning("ELEVENLABS_API_KEY not set — audio unavailable.")
+        return b""
+    client = ElevenLabs(api_key=api_key)
     audio = client.text_to_speech.convert(
         text=text,
         voice_id="JBFqnCBsd6RMkjVDRZzb",
         model_id="eleven_multilingual_v2",
         output_format="mp3_44100_128",
     )
-
-    audio_bytes = b"".join(audio)
-
-    return audio_bytes
-
-# ── 8-Step Pipeline ───────────────────────────────────────────────────────────
-
-def step1_understand(text: str) -> dict:
-    raw = call_gemini(f"""You are a financial news analyst. Read the following news text and provide a structured understanding.
-
-News Text:
-\"\"\"{text}\"\"\"
-
-Respond ONLY with a JSON object (no markdown, no backticks):
-{{
-  "summary": "A 1-2 sentence summary",
-  "topic": "Main topic (earnings, product launch, regulation, M&A, macro-economic, etc.)",
-  "industry": "Primary industry involved",
-  "relevance": "Why this matters to investors"
-}}""")
-    return safe_parse_json(raw)
+    return b"".join(audio)
 
 
-def step2_entities(text: str) -> dict:
-    raw = call_gemini(f"""You are a financial entity extractor. Extract all important entities from the news below.
+# ── Single combined analysis prompt ──────────────────────────────────────────
+
+def analyze_news(text: str) -> dict:
+    raw = call_gemini(f"""You are a senior financial news analyst, entity extractor, event detector, sentiment analyst, signal scorer, and investment decision advisor — all in one.
+
+Analyze the following news text and return a SINGLE JSON object covering all aspects below.
 
 News Text:
 \"\"\"{text}\"\"\"
 
-Respond ONLY with a JSON object (no markdown, no backticks):
+Respond ONLY with a JSON object (no markdown, no backticks) with exactly this structure:
+
 {{
-  "companies": ["List of company names"],
-  "people": ["Key individuals"],
-  "events": ["Business/financial events"],
-  "indicators": ["Financial indicators (revenue, EPS, margin, etc.)"],
-  "locations": ["Countries or regions if relevant"],
-  "products": ["Products or services mentioned"]
-}}""")
-    return safe_parse_json(raw)
-
-
-def step3_events(text: str) -> dict:
-    raw = call_gemini(f"""You are a financial event detector. Identify the specific business/financial event(s) in the news below.
-
-News Text:
-\"\"\"{text}\"\"\"
-
-Respond ONLY with a JSON object (no markdown, no backticks):
-{{
-  "primary_event": "The single most important event",
-  "event_category": "One of: earnings_report, product_launch, merger_acquisition, leadership_change, regulatory_action, market_movement, macro_event, partnership, legal_dispute, other",
-  "secondary_events": ["Any additional events"],
-  "event_stage": "announcement / completion / speculation / rumor",
-  "time_horizon": "immediate / short_term / long_term"
-}}""")
-    return safe_parse_json(raw)
-
-
-def step4_sentiment(text: str, entities: dict) -> dict:
-    companies = ", ".join(entities.get("companies", ["the company"]))
-    raw = call_gemini(f"""You are a financial sentiment analyst. Analyze the sentiment of the following news for: {companies}
-
-News Text:
-\"\"\"{text}\"\"\"
-
-Respond ONLY with a JSON object (no markdown, no backticks):
-{{
-  "overall_sentiment": "positive / negative / neutral / mixed",
-  "sentiment_score": <float -1.0 to 1.0>,
-  "per_company": {{
-    "<company_name>": {{"sentiment": "positive/negative/neutral", "score": <float>, "reason": "Brief reason"}}
+  "understanding": {{
+    "summary": "1-2 sentence summary of the news",
+    "topic": "Main topic (earnings, product launch, regulation, M&A, macro-economic, etc.)",
+    "industry": "Primary industry involved",
+    "relevance": "Why this matters to investors"
   }},
-  "market_reaction_expectation": "How markets are likely to react",
-  "short_term_impact": "positive / negative / neutral",
-  "long_term_impact": "positive / negative / neutral / uncertain"
+  "entities": {{
+    "companies": ["List of company names mentioned"],
+    "people": ["Key individuals mentioned"],
+    "events": ["Business/financial events mentioned"],
+    "indicators": ["Financial indicators mentioned (revenue, EPS, margin, etc.)"],
+    "locations": ["Countries or regions if relevant"],
+    "products": ["Products or services mentioned"]
+  }},
+  "events": {{
+    "primary_event": "The single most important event",
+    "event_category": "One of: earnings_report, product_launch, merger_acquisition, leadership_change, regulatory_action, market_movement, macro_event, partnership, legal_dispute, other",
+    "secondary_events": ["Any additional events"],
+    "event_stage": "announcement / completion / speculation / rumor",
+    "time_horizon": "immediate / short_term / long_term"
+  }},
+  "sentiment": {{
+    "overall_sentiment": "positive / negative / neutral / mixed",
+    "sentiment_score": <float -1.0 to 1.0>,
+    "per_company": {{
+      "<company_name>": {{"sentiment": "positive/negative/neutral", "score": <float>, "reason": "Brief reason"}}
+    }},
+    "market_reaction_expectation": "How markets are likely to react",
+    "short_term_impact": "positive / negative / neutral",
+    "long_term_impact": "positive / negative / neutral / uncertain"
+  }},
+  "signal": {{
+    "signal_strength": <integer 1-10>,
+    "signal_direction": "bullish / bearish / neutral",
+    "confidence": <float 0.0 to 1.0>,
+    "signal_label": "strong_buy / buy / hold / sell / strong_sell",
+    "volatility_expectation": "high / medium / low",
+    "scoring_rationale": "2-3 sentences explaining the score"
+  }},
+  "decision": {{
+    "decision": "strong_buy / buy / hold / sell / strong_sell / watch",
+    "conviction_level": "high / medium / low",
+    "key_drivers": ["2-4 key factors driving this decision"],
+    "risks": ["1-3 key risks to this view"],
+    "time_frame": "intraday / short_term (days) / medium_term (weeks) / long_term (months)",
+    "per_company_decision": {{"<company_name>": "buy / sell / hold / watch"}},
+    "action_summary": "One clear sentence: what should an investor consider doing?"
+  }},
+  "explanation": "3-4 sentences in plain English for a non-technical audience: what the news is about, why it generates this signal, what the recommended action is, and what risks exist."
 }}""")
     return safe_parse_json(raw)
 
 
-def step5_signal(text: str, sentiment: dict, events: dict) -> dict:
-    raw = call_gemini(f"""You are a quantitative financial signal scorer. Score the signal strength based on the analysis below.
-
-News Text:
-\"\"\"{text}\"\"\"
-
-Sentiment Score: {sentiment.get('sentiment_score', 0)}
-Overall Sentiment: {sentiment.get('overall_sentiment', 'unknown')}
-Primary Event: {events.get('primary_event', 'unknown')}
-Event Category: {events.get('event_category', 'unknown')}
-
-Respond ONLY with a JSON object (no markdown, no backticks):
-{{
-  "signal_strength": <integer 1-10>,
-  "signal_direction": "bullish / bearish / neutral",
-  "confidence": <float 0.0 to 1.0>,
-  "signal_label": "strong_buy / buy / hold / sell / strong_sell",
-  "volatility_expectation": "high / medium / low",
-  "scoring_rationale": "2-3 sentences explaining the score"
-}}""")
-    return safe_parse_json(raw)
-
-
-def step6_time_record(text: str, signal: dict, entities: dict) -> dict:
+def build_time_record(text: str, result: dict) -> dict:
+    signal   = result.get("signal", {})
+    entities = result.get("entities", {})
     date_match = re.search(r'\b(\d{4}-\d{2}-\d{2}|\w+ \d{1,2},? \d{4}|\d{1,2}/\d{1,2}/\d{4})\b', text)
-    timestamp = date_match.group(1) if date_match else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp  = date_match.group(1) if date_match else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return {
-        "timestamp": timestamp,
-        "companies": entities.get("companies", []),
+        "timestamp":        timestamp,
+        "companies":        entities.get("companies", []),
         "signal_direction": signal.get("signal_direction", "neutral"),
-        "signal_strength": signal.get("signal_strength", 0),
-        "signal_label": signal.get("signal_label", "hold"),
-        "confidence": signal.get("confidence", 0.0),
-        "tracked_at": datetime.now().isoformat(),
+        "signal_strength":  signal.get("signal_strength", 0),
+        "signal_label":     signal.get("signal_label", "hold"),
+        "confidence":       signal.get("confidence", 0.0),
+        "tracked_at":       datetime.now().isoformat(),
     }
-
-
-def step7_decision(entities: dict, sentiment: dict, signal: dict, events: dict) -> dict:
-    companies = ", ".join(entities.get("companies", ["Unknown"]))
-    raw = call_gemini(f"""You are a financial decision support system. Synthesize these signals into a clear investment decision.
-
-Companies: {companies}
-Primary Event: {events.get('primary_event', 'N/A')}
-Event Category: {events.get('event_category', 'N/A')}
-Sentiment: {sentiment.get('overall_sentiment', 'N/A')} (score: {sentiment.get('sentiment_score', 0)})
-Short-term Impact: {sentiment.get('short_term_impact', 'N/A')}
-Long-term Impact: {sentiment.get('long_term_impact', 'N/A')}
-Signal Direction: {signal.get('signal_direction', 'N/A')}
-Signal Strength: {signal.get('signal_strength', 0)}/10
-Signal Label: {signal.get('signal_label', 'N/A')}
-Confidence: {signal.get('confidence', 0)}
-
-Respond ONLY with a JSON object (no markdown, no backticks):
-{{
-  "decision": "strong_buy / buy / hold / sell / strong_sell / watch",
-  "conviction_level": "high / medium / low",
-  "key_drivers": ["2-4 key factors"],
-  "risks": ["1-3 key risks"],
-  "time_frame": "intraday / short_term (days) / medium_term (weeks) / long_term (months)",
-  "per_company_decision": {{"<company_name>": "buy / sell / hold / watch"}},
-  "action_summary": "One clear sentence: what should an investor consider doing?"
-}}""")
-    return safe_parse_json(raw)
-
-
-def step8_explanation(understanding: dict, entities: dict, events: dict,
-                       sentiment: dict, signal: dict, decision: dict) -> str:
-    companies = ", ".join(entities.get("companies", ["the company"]))
-    return call_gemini(f"""You are a financial analyst writing for a non-technical audience.
-Write a clear, concise 3-4 sentence paragraph explaining:
-1. What the news is about
-2. Why it generates this signal
-3. What the recommended action/watch is
-4. What risks exist
-
-Original Summary: {understanding.get('summary', '')}
-Companies: {companies}
-Event: {events.get('primary_event', 'N/A')}
-Sentiment: {sentiment.get('overall_sentiment', 'N/A')}
-Signal: {signal.get('signal_direction', 'N/A')} — strength {signal.get('signal_strength', 0)}/10
-Decision: {decision.get('decision', 'N/A')}
-Key Drivers: {', '.join(decision.get('key_drivers', []))}
-Risks: {', '.join(decision.get('risks', []))}
-
-Plain English only. No bullets. No headers. Just a clear paragraph.""")
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -412,8 +325,37 @@ st.markdown("""
   <div class="header-title">QuantAnalyzer.AI</div>
   <div class="header-badge">Gemini · Powered</div>
 </div>
-<div class="header-sub">// upload a .txt news file → run the 8-step pipeline → get signal strength & decision insight</div>
+<div class="header-sub">// upload a .txt news file → run analysis → get signal strength & decision insight</div>
 """, unsafe_allow_html=True)
+
+
+explanation_text = (
+        "Hi, this project is called QuantAnalyzer.AI, and it’s an AI system "
+        "that converts raw financial news into structured investment signals. "
+        "The main problem we wanted to solve is that investors often read large "
+        "amounts of news, but it’s difficult to quickly understand the real market impact. "
+        "So we built a system that uses Google Gemini large language models to automatically "
+        "analyze financial news articles. When a user uploads a news article, the system "
+        "runs it through an 8-step analysis pipeline. First it summarizes the article "
+        "and identifies the main topic and industry. Then it extracts important entities "
+        "like companies and events, detects financial events such as earnings or mergers, "
+        "and performs sentiment analysis on the potential market impact. Using this information, "
+        "the system generates a quantitative signal score from 1 to 10, determines whether the "
+        "signal is bullish, bearish, or neutral, and produces an investment recommendation like "
+        "buy, sell, hold, or watch. The results are displayed in an interactive Streamlit dashboard, "
+        "and the system also generates a human-friendly explanation of the signal. Finally, we use "
+        "ElevenLabs text-to-speech to convert the explanation into an audio summary. Overall, "
+        "the goal of this project is to demonstrate how AI can transform unstructured financial news "
+        "into actionable insights for investors."
+    )
+
+# Generate speech
+audio_bytes2 = speak_text(explanation_text)
+
+st.markdown("Project Explanation Audio:")
+
+# Play audio in the UI
+st.audio(audio_bytes2, format="audio/mp3")
 
 st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
@@ -430,7 +372,7 @@ if uploaded:
     except UnicodeDecodeError:
         text = raw.decode("latin-1")
 
-    text = text[:6000]  # cap to avoid token overrun
+    text = text[:6000]
 
     words     = len(text.split())
     chars     = len(text)
@@ -454,58 +396,18 @@ if uploaded:
 
     if st.button("⚡  RUN SIGNAL ANALYSIS"):
 
-        STEPS = ["Understanding", "Entities", "Events", "Sentiment",
-                 "Signal Score", "Timestamp", "Decision", "Explanation"]
-        step_placeholder = st.empty()
+        with st.spinner("Analyzing news — this will take a moment…"):
+            result = analyze_news(text)
+            build_time_record(text, result)
 
-        def render_steps(done_up_to: int, active: int):
-            dots = ""
-            for i, s in enumerate(STEPS):
-                cls = "done" if i < done_up_to else ("active" if i == active else "")
-                dots += f'<div class="step-dot {cls}">{s}</div>'
-            step_placeholder.markdown(f'<div class="step-bar">{dots}</div>', unsafe_allow_html=True)
+        # ── Unpack ────────────────────────────────────────────────────────────
+        entities    = result.get("entities", {})
+        events      = result.get("events", {})
+        sentiment   = result.get("sentiment", {})
+        signal      = result.get("signal", {})
+        decision    = result.get("decision", {})
+        explanation = result.get("explanation", "—")
 
-        render_steps(0, 0)
-        with st.spinner("Step 1 · Understanding text…"):
-            understanding = step1_understand(text)
-        render_steps(1, 1)
-
-        with st.spinner("Step 2 · Identifying entities…"):
-            entities = step2_entities(text)
-        render_steps(2, 2)
-
-        with st.spinner("Step 3 · Detecting events…"):
-            events = step3_events(text)
-        render_steps(3, 3)
-
-        with st.spinner("Step 4 · Analyzing sentiment…"):
-            sentiment = step4_sentiment(text, entities)
-        render_steps(4, 4)
-
-        with st.spinner("Step 5 · Scoring signal strength…"):
-            signal = step5_signal(text, sentiment, events)
-        render_steps(5, 5)
-
-        with st.spinner("Step 6 · Recording timestamp…"):
-            time_record = step6_time_record(text, signal, entities)
-        render_steps(6, 6)
-
-        with st.spinner("Step 7 · Generating decision insight…"):
-            decision = step7_decision(entities, sentiment, signal, events)
-        render_steps(7, 7)
-
-        with st.spinner("Step 8 · Writing analyst explanation…"):
-            explanation = step8_explanation(understanding, entities, events, sentiment, signal, decision)
-
-        # Generate speech
-        audio_bytes = speak_text(explanation)
-
-        # Play audio in the UI
-        st.audio(audio_bytes, format="audio/mp3")
-
-        render_steps(8, -1)
-
-        # ── Results ──────────────────────────────────────────────────────────
         direction  = signal.get("signal_direction", "neutral").lower()
         strength   = signal.get("signal_strength", 0)
         label      = signal.get("signal_label", "hold").upper().replace("_", " ")
@@ -597,16 +499,13 @@ if uploaded:
         </div>
         """, unsafe_allow_html=True)
 
-        explanation_text = "Hi, this project is called QuantAnalyzer.AI, and it’s an AI system that converts raw financial news into structured investment signals. The main problem we wanted to solve is that investors often read large amounts of news, but it’s difficult to quickly understand the real market impact. So we built a system that uses Google Gemini large language models to automatically analyze financial news articles. When a user uploads a news article, the system runs it through an 8-step analysis pipeline. First it summarizes the article and identifies the main topic and industry. Then it extracts important entities like companies and events, detects financial events such as earnings or mergers, and performs sentiment analysis on the potential market impact. Using this information, the system generates a quantitative signal score from 1 to 10, determines whether the signal is bullish, bearish, or neutral, and produces an investment recommendation like buy, sell, hold, or watch. The results are displayed in an interactive Streamlit dashboard, and the system also generates a human-friendly explanation of the signal. Finally, we use ElevenLabs text-to-speech to convert the explanation into an audio summary. Overall, the goal of this project is to demonstrate how AI can transform unstructured financial news into actionable insights for investors."
-        # Heading above the explanation audio
-        st.markdown("### Project Explanation (Audio)")
+        # ElevenLabs audio
+        with st.spinner("Generating audio…"):
+            audio_bytes = speak_text(explanation)
 
-        # Generate speech
-        audio_bytes2 = speak_text(explanation_text)
-
-        # Play audio in the UI
-        st.audio(audio_bytes2, format="audio/mp3")
-        
+        if audio_bytes:
+            st.markdown('<div class="audio-label">↳ Listen to Analyst Explanation</div>', unsafe_allow_html=True)
+            st.audio(audio_bytes, format="audio/mp3")
 
 else:
     st.markdown("""
@@ -614,3 +513,4 @@ else:
         NO FILE LOADED · AWAITING INPUT
     </div>
     """, unsafe_allow_html=True)
+

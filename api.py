@@ -1,14 +1,13 @@
 """
 api.py — FastAPI backend for News Signal Analyzer
-Mirrors the 8-step Gemini pipeline from app.py as REST endpoints.
+Uses a single Gemini prompt for the full analysis pipeline.
 
 Run:
     uvicorn api:app --reload --port 8000
 
 Endpoints:
-    POST /analyze          — full 8-step pipeline (upload .txt file)
-    POST /analyze/text     — full 8-step pipeline (JSON body)
-    POST /analyze/step/{n} — run a single step (1-8) for debugging
+    POST /analyze          — full pipeline (upload .txt file)
+    POST /analyze/text     — full pipeline (JSON body)
     GET  /health           — health check
 """
 
@@ -19,7 +18,7 @@ import base64
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -33,19 +32,19 @@ load_dotenv()
 
 app = FastAPI(
     title="News Signal Analyzer API",
-    description="8-step financial news signal pipeline powered by Gemini",
-    version="1.0.0",
+    description="Financial news signal pipeline powered by a single Gemini prompt",
+    version="2.0.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # tighten in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── Pydantic models ───────────────────────────────────────────────────────────
+# ── Models ────────────────────────────────────────────────────────────────────
 
 class TextBody(BaseModel):
     text: str
@@ -59,33 +58,16 @@ class FullAnalysisResponse(BaseModel):
     time_record: dict
     decision: dict
     explanation: str
-    audio_base64: Optional[str] = None   # mp3 bytes encoded as base64
+    audio_base64: Optional[str] = None
 
 
-# ── Gemini helpers ────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 
-GEMINI_MODEL = "gemini-3-flash-preview"   # mirrors app.py exactly
-MAX_CHARS = 6000
-
-
-def get_gemini_client() -> genai.Client:
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="GEMINI_API_KEY environment variable is not set.",
-        )
-    return genai.Client(api_key=api_key)
+GEMINI_MODEL = "gemini-2.5-flash"
+MAX_CHARS    = 6000
 
 
-def call_gemini(prompt: str) -> str:
-    client = get_gemini_client()
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-    )
-    return (response.text or "").strip()
-
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def safe_parse_json(raw: str) -> dict:
     cleaned = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
@@ -101,16 +83,19 @@ def safe_parse_json(raw: str) -> dict:
     return {"parse_error": True, "raw": raw}
 
 
-# ── ElevenLabs TTS (mirrors app.py speak_text) ───────────────────────────────
+def call_gemini(prompt: str) -> str:
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not set.")
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    return (response.text or "").strip()
+
 
 def speak_text(text: str) -> bytes:
-    """Convert text to MP3 bytes using ElevenLabs — identical to app.py."""
-    api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    api_key = os.environ.get("ELEVENLABS_API_KEY", "")
     if not api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="ELEVENLABS_API_KEY environment variable is not set.",
-        )
+        raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY is not set.")
     client = ElevenLabs(api_key=api_key)
     audio = client.text_to_speech.convert(
         text=text,
@@ -121,188 +106,107 @@ def speak_text(text: str) -> bytes:
     return b"".join(audio)
 
 
-# ── 8-Step pipeline functions (identical logic to app.py) ─────────────────────
-
-def step1_understand(text: str) -> dict:
-    raw = call_gemini(f"""You are a financial news analyst. Read the following news text and provide a structured understanding.
-
-News Text:
-\"\"\"{text}\"\"\"
-
-Respond ONLY with a JSON object (no markdown, no backticks):
-{{
-  "summary": "A 1-2 sentence summary",
-  "topic": "Main topic (earnings, product launch, regulation, M&A, macro-economic, etc.)",
-  "industry": "Primary industry involved",
-  "relevance": "Why this matters to investors"
-}}""")
-    return safe_parse_json(raw)
-
-
-def step2_entities(text: str) -> dict:
-    raw = call_gemini(f"""You are a financial entity extractor. Extract all important entities from the news below.
-
-News Text:
-\"\"\"{text}\"\"\"
-
-Respond ONLY with a JSON object (no markdown, no backticks):
-{{
-  "companies": ["List of company names"],
-  "people": ["Key individuals"],
-  "events": ["Business/financial events"],
-  "indicators": ["Financial indicators (revenue, EPS, margin, etc.)"],
-  "locations": ["Countries or regions if relevant"],
-  "products": ["Products or services mentioned"]
-}}""")
-    return safe_parse_json(raw)
-
-
-def step3_events(text: str) -> dict:
-    raw = call_gemini(f"""You are a financial event detector. Identify the specific business/financial event(s) in the news below.
-
-News Text:
-\"\"\"{text}\"\"\"
-
-Respond ONLY with a JSON object (no markdown, no backticks):
-{{
-  "primary_event": "The single most important event",
-  "event_category": "One of: earnings_report, product_launch, merger_acquisition, leadership_change, regulatory_action, market_movement, macro_event, partnership, legal_dispute, other",
-  "secondary_events": ["Any additional events"],
-  "event_stage": "announcement / completion / speculation / rumor",
-  "time_horizon": "immediate / short_term / long_term"
-}}""")
-    return safe_parse_json(raw)
-
-
-def step4_sentiment(text: str, entities: dict) -> dict:
-    companies = ", ".join(entities.get("companies", ["the company"]))
-    raw = call_gemini(f"""You are a financial sentiment analyst. Analyze the sentiment of the following news for: {companies}
-
-News Text:
-\"\"\"{text}\"\"\"
-
-Respond ONLY with a JSON object (no markdown, no backticks):
-{{
-  "overall_sentiment": "positive / negative / neutral / mixed",
-  "sentiment_score": <float -1.0 to 1.0>,
-  "per_company": {{
-    "<company_name>": {{"sentiment": "positive/negative/neutral", "score": <float>, "reason": "Brief reason"}}
-  }},
-  "market_reaction_expectation": "How markets are likely to react",
-  "short_term_impact": "positive / negative / neutral",
-  "long_term_impact": "positive / negative / neutral / uncertain"
-}}""")
-    return safe_parse_json(raw)
-
-
-def step5_signal(text: str, sentiment: dict, events: dict) -> dict:
-    raw = call_gemini(f"""You are a quantitative financial signal scorer. Score the signal strength based on the analysis below.
-
-News Text:
-\"\"\"{text}\"\"\"
-
-Sentiment Score: {sentiment.get('sentiment_score', 0)}
-Overall Sentiment: {sentiment.get('overall_sentiment', 'unknown')}
-Primary Event: {events.get('primary_event', 'unknown')}
-Event Category: {events.get('event_category', 'unknown')}
-
-Respond ONLY with a JSON object (no markdown, no backticks):
-{{
-  "signal_strength": <integer 1-10>,
-  "signal_direction": "bullish / bearish / neutral",
-  "confidence": <float 0.0 to 1.0>,
-  "signal_label": "strong_buy / buy / hold / sell / strong_sell",
-  "volatility_expectation": "high / medium / low",
-  "scoring_rationale": "2-3 sentences explaining the score"
-}}""")
-    return safe_parse_json(raw)
-
-
-def step6_time_record(text: str, signal: dict, entities: dict) -> dict:
+def build_time_record(text: str, result: dict) -> dict:
+    signal   = result.get("signal", {})
+    entities = result.get("entities", {})
     date_match = re.search(
         r'\b(\d{4}-\d{2}-\d{2}|\w+ \d{1,2},? \d{4}|\d{1,2}/\d{1,2}/\d{4})\b', text
     )
     timestamp = date_match.group(1) if date_match else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return {
-        "timestamp": timestamp,
-        "companies": entities.get("companies", []),
+        "timestamp":        timestamp,
+        "companies":        entities.get("companies", []),
         "signal_direction": signal.get("signal_direction", "neutral"),
-        "signal_strength": signal.get("signal_strength", 0),
-        "signal_label": signal.get("signal_label", "hold"),
-        "confidence": signal.get("confidence", 0.0),
-        "tracked_at": datetime.now().isoformat(),
+        "signal_strength":  signal.get("signal_strength", 0),
+        "signal_label":     signal.get("signal_label", "hold"),
+        "confidence":       signal.get("confidence", 0.0),
+        "tracked_at":       datetime.now().isoformat(),
     }
 
 
-def step7_decision(entities: dict, sentiment: dict, signal: dict, events: dict) -> dict:
-    companies = ", ".join(entities.get("companies", ["Unknown"]))
-    raw = call_gemini(f"""You are a financial decision support system. Synthesize these signals into a clear investment decision.
+# ── Single combined analysis prompt ──────────────────────────────────────────
 
-Companies: {companies}
-Primary Event: {events.get('primary_event', 'N/A')}
-Event Category: {events.get('event_category', 'N/A')}
-Sentiment: {sentiment.get('overall_sentiment', 'N/A')} (score: {sentiment.get('sentiment_score', 0)})
-Short-term Impact: {sentiment.get('short_term_impact', 'N/A')}
-Long-term Impact: {sentiment.get('long_term_impact', 'N/A')}
-Signal Direction: {signal.get('signal_direction', 'N/A')}
-Signal Strength: {signal.get('signal_strength', 0)}/10
-Signal Label: {signal.get('signal_label', 'N/A')}
-Confidence: {signal.get('confidence', 0)}
+def analyze_news(text: str) -> dict:
+    raw = call_gemini(f"""You are a senior financial news analyst, entity extractor, event detector, sentiment analyst, signal scorer, and investment decision advisor — all in one.
 
-Respond ONLY with a JSON object (no markdown, no backticks):
+Analyze the following news text and return a SINGLE JSON object covering all aspects below.
+
+News Text:
+\"\"\"{text}\"\"\"
+
+Respond ONLY with a JSON object (no markdown, no backticks) with exactly this structure:
+
 {{
-  "decision": "strong_buy / buy / hold / sell / strong_sell / watch",
-  "conviction_level": "high / medium / low",
-  "key_drivers": ["2-4 key factors"],
-  "risks": ["1-3 key risks"],
-  "time_frame": "intraday / short_term (days) / medium_term (weeks) / long_term (months)",
-  "per_company_decision": {{"<company_name>": "buy / sell / hold / watch"}},
-  "action_summary": "One clear sentence: what should an investor consider doing?"
+  "understanding": {{
+    "summary": "1-2 sentence summary of the news",
+    "topic": "Main topic (earnings, product launch, regulation, M&A, macro-economic, etc.)",
+    "industry": "Primary industry involved",
+    "relevance": "Why this matters to investors"
+  }},
+  "entities": {{
+    "companies": ["List of company names mentioned"],
+    "people": ["Key individuals mentioned"],
+    "events": ["Business/financial events mentioned"],
+    "indicators": ["Financial indicators mentioned (revenue, EPS, margin, etc.)"],
+    "locations": ["Countries or regions if relevant"],
+    "products": ["Products or services mentioned"]
+  }},
+  "events": {{
+    "primary_event": "The single most important event",
+    "event_category": "One of: earnings_report, product_launch, merger_acquisition, leadership_change, regulatory_action, market_movement, macro_event, partnership, legal_dispute, other",
+    "secondary_events": ["Any additional events"],
+    "event_stage": "announcement / completion / speculation / rumor",
+    "time_horizon": "immediate / short_term / long_term"
+  }},
+  "sentiment": {{
+    "overall_sentiment": "positive / negative / neutral / mixed",
+    "sentiment_score": <float -1.0 to 1.0>,
+    "per_company": {{
+      "<company_name>": {{"sentiment": "positive/negative/neutral", "score": <float>, "reason": "Brief reason"}}
+    }},
+    "market_reaction_expectation": "How markets are likely to react",
+    "short_term_impact": "positive / negative / neutral",
+    "long_term_impact": "positive / negative / neutral / uncertain"
+  }},
+  "signal": {{
+    "signal_strength": <integer 1-10>,
+    "signal_direction": "bullish / bearish / neutral",
+    "confidence": <float 0.0 to 1.0>,
+    "signal_label": "strong_buy / buy / hold / sell / strong_sell",
+    "volatility_expectation": "high / medium / low",
+    "scoring_rationale": "2-3 sentences explaining the score"
+  }},
+  "decision": {{
+    "decision": "strong_buy / buy / hold / sell / strong_sell / watch",
+    "conviction_level": "high / medium / low",
+    "key_drivers": ["2-4 key factors driving this decision"],
+    "risks": ["1-3 key risks to this view"],
+    "time_frame": "intraday / short_term (days) / medium_term (weeks) / long_term (months)",
+    "per_company_decision": {{"<company_name>": "buy / sell / hold / watch"}},
+    "action_summary": "One clear sentence: what should an investor consider doing?"
+  }},
+  "explanation": "3-4 sentences in plain English for a non-technical audience: what the news is about, why it generates this signal, what the recommended action is, and what risks exist."
 }}""")
     return safe_parse_json(raw)
 
 
-def step8_explanation(
-    understanding: dict, entities: dict, events: dict,
-    sentiment: dict, signal: dict, decision: dict,
-) -> str:
-    companies = ", ".join(entities.get("companies", ["the company"]))
-    return call_gemini(f"""You are a financial analyst writing for a non-technical audience.
-Write a clear, concise 3-4 sentence paragraph explaining:
-1. What the news is about
-2. Why it generates this signal
-3. What the recommended action/watch is
-4. What risks exist
-
-Original Summary: {understanding.get('summary', '')}
-Companies: {companies}
-Event: {events.get('primary_event', 'N/A')}
-Sentiment: {sentiment.get('overall_sentiment', 'N/A')}
-Signal: {signal.get('signal_direction', 'N/A')} — strength {signal.get('signal_strength', 0)}/10
-Decision: {decision.get('decision', 'N/A')}
-Key Drivers: {', '.join(decision.get('key_drivers', []))}
-Risks: {', '.join(decision.get('risks', []))}
-
-Plain English only. No bullets. No headers. Just a clear paragraph.""")
-
-
 # ── Internal runner ───────────────────────────────────────────────────────────
 
-def run_full_pipeline(text: str) -> FullAnalysisResponse:
-    text = text[:MAX_CHARS]
+def run_pipeline(text: str) -> FullAnalysisResponse:
+    text   = text[:MAX_CHARS]
+    result = analyze_news(text)
 
-    understanding = step1_understand(text)
-    entities      = step2_entities(text)
-    events        = step3_events(text)
-    sentiment     = step4_sentiment(text, entities)
-    signal        = step5_signal(text, sentiment, events)
-    time_record   = step6_time_record(text, signal, entities)
-    decision      = step7_decision(entities, sentiment, signal, events)
-    explanation   = step8_explanation(understanding, entities, events, sentiment, signal, decision)
+    understanding = result.get("understanding", {})
+    entities      = result.get("entities", {})
+    events        = result.get("events", {})
+    sentiment     = result.get("sentiment", {})
+    signal        = result.get("signal", {})
+    decision      = result.get("decision", {})
+    explanation   = result.get("explanation", "")
+    time_record   = build_time_record(text, result)
 
-    # Generate speech — mirrors app.py speak_text call
-    audio_bytes   = speak_text(explanation)
-    audio_b64     = base64.b64encode(audio_bytes).decode("utf-8")
+    audio_bytes = speak_text(explanation)
+    audio_b64   = base64.b64encode(audio_bytes).decode("utf-8")
 
     return FullAnalysisResponse(
         understanding=understanding,
@@ -321,103 +225,25 @@ def run_full_pipeline(text: str) -> FullAnalysisResponse:
 
 @app.get("/health", tags=["Utility"])
 def health():
-    """Simple health check."""
     return {"status": "ok", "model": GEMINI_MODEL}
 
 
 @app.post("/analyze", response_model=FullAnalysisResponse, tags=["Pipeline"])
 async def analyze_file(file: UploadFile = File(...)):
-    """
-    Upload a .txt news file and run the full 8-step signal pipeline.
-    Returns structured JSON with all intermediate step results, the final
-    explanation, and the analyst audio as a base64-encoded MP3.
-    """
+    """Upload a .txt news file and run the full signal analysis pipeline."""
     if not file.filename.endswith(".txt"):
         raise HTTPException(status_code=400, detail="Only .txt files are accepted.")
-
     raw = await file.read()
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         text = raw.decode("latin-1")
-
-    return run_full_pipeline(text)
+    return run_pipeline(text)
 
 
 @app.post("/analyze/text", response_model=FullAnalysisResponse, tags=["Pipeline"])
 def analyze_text(body: TextBody):
-    """
-    Send raw news text as a JSON body and run the full 8-step signal pipeline.
-
-    Body: { "text": "..." }
-    """
+    """Send raw news text as a JSON body and run the full signal analysis pipeline."""
     if not body.text.strip():
         raise HTTPException(status_code=400, detail="text field must not be empty.")
-    return run_full_pipeline(body.text)
-
-
-@app.post("/analyze/step/{step_number}", tags=["Debug"])
-def analyze_single_step(
-    step_number: int,
-    body: TextBody,
-    sentiment_score: Optional[float] = Query(default=0.0),
-    overall_sentiment: Optional[str] = Query(default="neutral"),
-    primary_event: Optional[str] = Query(default="unknown"),
-    event_category: Optional[str] = Query(default="other"),
-):
-    """
-    Run a single pipeline step (1–8) for debugging purposes.
-
-    Steps 4–8 may need context from earlier steps; pass optional query params
-    or use /analyze for the full chained run.
-    """
-    text = body.text[:MAX_CHARS]
-
-    if step_number == 1:
-        return step1_understand(text)
-
-    elif step_number == 2:
-        return step2_entities(text)
-
-    elif step_number == 3:
-        return step3_events(text)
-
-    elif step_number == 4:
-        entities = step2_entities(text)
-        return step4_sentiment(text, entities)
-
-    elif step_number == 5:
-        mock_sentiment = {"sentiment_score": sentiment_score, "overall_sentiment": overall_sentiment}
-        mock_events    = {"primary_event": primary_event, "event_category": event_category}
-        return step5_signal(text, mock_sentiment, mock_events)
-
-    elif step_number == 6:
-        entities   = step2_entities(text)
-        sentiment  = step4_sentiment(text, entities)
-        events     = step3_events(text)
-        signal     = step5_signal(text, sentiment, events)
-        return step6_time_record(text, signal, entities)
-
-    elif step_number == 7:
-        entities  = step2_entities(text)
-        sentiment = step4_sentiment(text, entities)
-        events    = step3_events(text)
-        signal    = step5_signal(text, sentiment, events)
-        return step7_decision(entities, sentiment, signal, events)
-
-    elif step_number == 8:
-        understanding = step1_understand(text)
-        entities      = step2_entities(text)
-        events        = step3_events(text)
-        sentiment     = step4_sentiment(text, entities)
-        signal        = step5_signal(text, sentiment, events)
-        decision      = step7_decision(entities, sentiment, signal, events)
-        explanation   = step8_explanation(understanding, entities, events, sentiment, signal, decision)
-        audio_bytes   = speak_text(explanation)
-        return {
-            "explanation": explanation,
-            "audio_base64": base64.b64encode(audio_bytes).decode("utf-8"),
-        }
-
-    else:
-        raise HTTPException(status_code=400, detail="step_number must be between 1 and 8.")
+    return run_pipeline(body.text)
