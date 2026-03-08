@@ -597,6 +597,17 @@ if uploaded:
         </div>
         """, unsafe_allow_html=True)
 
+        explanation_text = "Hi, this project is called QuantAnalyzer.AI, and it’s an AI system that converts raw financial news into structured investment signals. The main problem we wanted to solve is that investors often read large amounts of news, but it’s difficult to quickly understand the real market impact. So we built a system that uses Google Gemini large language models to automatically analyze financial news articles. When a user uploads a news article, the system runs it through an 8-step analysis pipeline. First it summarizes the article and identifies the main topic and industry. Then it extracts important entities like companies and events, detects financial events such as earnings or mergers, and performs sentiment analysis on the potential market impact. Using this information, the system generates a quantitative signal score from 1 to 10, determines whether the signal is bullish, bearish, or neutral, and produces an investment recommendation like buy, sell, hold, or watch. The results are displayed in an interactive Streamlit dashboard, and the system also generates a human-friendly explanation of the signal. Finally, we use ElevenLabs text-to-speech to convert the explanation into an audio summary. Overall, the goal of this project is to demonstrate how AI can transform unstructured financial news into actionable insights for investors."
+        # Heading above the explanation audio
+        st.markdown("### Project Explanation (Audio)")
+
+        # Generate speech
+        audio_bytes2 = speak_text(explanation_text)
+
+        # Play audio in the UI
+        st.audio(audio_bytes2, format="audio/mp3")
+        
+
 else:
     st.markdown("""
     <div style="text-align:center; padding: 3rem 0; color: #3a3f52; font-family:'DM Mono',monospace; font-size:0.8rem; letter-spacing:0.1em;">
