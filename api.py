@@ -6,7 +6,8 @@ Run:
     uvicorn api:app --reload --port 8000
 
 Endpoints:
-    POST /analyze          — full 8-step pipeline (upload .txt or send JSON body)
+    POST /analyze          — full 8-step pipeline (upload .txt file)
+    POST /analyze/text     — full 8-step pipeline (JSON body)
     POST /analyze/step/{n} — run a single step (1-8) for debugging
     GET  /health           — health check
 """
@@ -14,6 +15,7 @@ Endpoints:
 import json
 import re
 import os
+import base64
 from datetime import datetime
 from typing import Optional
 
@@ -22,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from google import genai
+from elevenlabs.client import ElevenLabs
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -56,11 +59,12 @@ class FullAnalysisResponse(BaseModel):
     time_record: dict
     decision: dict
     explanation: str
+    audio_base64: Optional[str] = None   # mp3 bytes encoded as base64
 
 
 # ── Gemini helpers ────────────────────────────────────────────────────────────
 
-GEMINI_MODEL = "gemini-2.5-flash-preview-04-17"
+GEMINI_MODEL = "gemini-3-flash-preview"   # mirrors app.py exactly
 MAX_CHARS = 6000
 
 
@@ -95,6 +99,26 @@ def safe_parse_json(raw: str) -> dict:
             except Exception:
                 pass
     return {"parse_error": True, "raw": raw}
+
+
+# ── ElevenLabs TTS (mirrors app.py speak_text) ───────────────────────────────
+
+def speak_text(text: str) -> bytes:
+    """Convert text to MP3 bytes using ElevenLabs — identical to app.py."""
+    api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="ELEVENLABS_API_KEY environment variable is not set.",
+        )
+    client = ElevenLabs(api_key=api_key)
+    audio = client.text_to_speech.convert(
+        text=text,
+        voice_id="JBFqnCBsd6RMkjVDRZzb",
+        model_id="eleven_multilingual_v2",
+        output_format="mp3_44100_128",
+    )
+    return b"".join(audio)
 
 
 # ── 8-Step pipeline functions (identical logic to app.py) ─────────────────────
@@ -276,6 +300,10 @@ def run_full_pipeline(text: str) -> FullAnalysisResponse:
     decision      = step7_decision(entities, sentiment, signal, events)
     explanation   = step8_explanation(understanding, entities, events, sentiment, signal, decision)
 
+    # Generate speech — mirrors app.py speak_text call
+    audio_bytes   = speak_text(explanation)
+    audio_b64     = base64.b64encode(audio_bytes).decode("utf-8")
+
     return FullAnalysisResponse(
         understanding=understanding,
         entities=entities,
@@ -285,6 +313,7 @@ def run_full_pipeline(text: str) -> FullAnalysisResponse:
         time_record=time_record,
         decision=decision,
         explanation=explanation,
+        audio_base64=audio_b64,
     )
 
 
@@ -300,7 +329,8 @@ def health():
 async def analyze_file(file: UploadFile = File(...)):
     """
     Upload a .txt news file and run the full 8-step signal pipeline.
-    Returns structured JSON with all intermediate step results plus the final explanation.
+    Returns structured JSON with all intermediate step results, the final
+    explanation, and the analyst audio as a base64-encoded MP3.
     """
     if not file.filename.endswith(".txt"):
         raise HTTPException(status_code=400, detail="Only .txt files are accepted.")
@@ -382,7 +412,12 @@ def analyze_single_step(
         sentiment     = step4_sentiment(text, entities)
         signal        = step5_signal(text, sentiment, events)
         decision      = step7_decision(entities, sentiment, signal, events)
-        return {"explanation": step8_explanation(understanding, entities, events, sentiment, signal, decision)}
+        explanation   = step8_explanation(understanding, entities, events, sentiment, signal, decision)
+        audio_bytes   = speak_text(explanation)
+        return {
+            "explanation": explanation,
+            "audio_base64": base64.b64encode(audio_bytes).decode("utf-8"),
+        }
 
     else:
         raise HTTPException(status_code=400, detail="step_number must be between 1 and 8.")
